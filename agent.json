@@ -1,0 +1,43 @@
+{
+  "mode": "gunner",
+  "scan_gap_s": 0.015,
+  "target_zone": [
+    0.02,
+    0.88
+  ],
+  "require_blue": true,
+  "hover_confirm_s": 0.5,
+  "hover_poll_s": 0.03,
+  "hover_blue_min": 60,
+  "hover_delta_min": 25,
+  "hover_red_min": 24,
+  "hover_red_delta_min": 12,
+  "attack_interval_s": 0.3,
+  "skill_keys": [],
+  "skill_every_s": 0.9,
+  "track_radius": 90,
+  "fight_white_min": 6,
+  "no_hit_s": 6.0,
+  "give_up_s": 15.0,
+  "max_clicks": 2,
+  "potion_key": "0",
+  "hp_potion_below": 0.55,
+  "potion_confirm_s": 1.0,
+  "potion_cooldown_s": 4.0,
+  "hp_box": [
+    24,
+    988,
+    150,
+    1010
+  ],
+  "loot_key": "z",
+  "loot_after_hit": false,
+  "loot_every_s": 1.5,
+  "chat_watch": true,
+  "chat_box": [
+    0.77,
+    0.672,
+    0.984,
+    0.914
+  ]
+}

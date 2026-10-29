@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+ScreenShots/
+live_report.json
+live_annotated.png
+mobbook.json
+signatures.json
