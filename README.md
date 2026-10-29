@@ -30,10 +30,12 @@ Each of the three classes uses that same loop:
 
 Between targets, on a timer, the bot also takes a **buffer break**: every
 `buffer_every_s` (default 60 s) it points 30 px under the nearest **white**
-nameplate — players and the buffer are white, mobs are pink — and holds the
-RIGHT button for `buffer_hold_s` (5 s), then resumes farming. It never
+nameplate — players and the buffer are white, mobs are pink — holds the RIGHT
+button on that character gunner-style, and casts the chosen `buffer_keys`
+(`"1 2 3"` or `all`; empty = plain hold) one after another, `buffer_hold_s`
+(5 s) each so a charge can finish. Then it resumes farming. It never
 interrupts an engaged target. Toggle it with `buffer_mode` (on by default in
-`agent.json`), and the hold/every values are in the panel.
+`agent.json`); the keys/hold/every values are in the panel.
 
 Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
 is ticked.
@@ -94,10 +96,17 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
   target engaged a moment later. It counts kills in the footer, but it is not
   on the fast path — pixels still swap targets in ~0.1 s.
 * **Buffer**: white nameplates are found with a second half-resolution scan
-  (S ≤ 70, V ≥ 185), with the chat box and the bot's own panel cut out; mobs
-  stay pink. The right-hold keeps the cursor on the same client point for the
-  whole hold, and a missing white name means it retries on the next scan —
-  no target is ever dropped for a buffer break.
+  (V ≥ 180, S ≤ 38, ink density 0.05 — white text is thin, the pink 0.15
+  floor throws it away; S 45+ lets the dim edge of a pink "Spiderz" through).
+  The whole chat panel, the minimap with its white `231,3966` coordinate text,
+  and the bot's own panel are cut out. Your own nameplate is white too and
+  floats over screen centre, so the plate nearest the centre is skipped — the
+  bot would otherwise buff nothing but itself. The right-hold keeps the cursor
+  on the same client point for the whole break; each chosen skill key is
+  pressed once at the start of its `buffer_hold_s` slot and the button stays
+  down across the whole cast, so a charge is never cancelled by a release.
+  A missing white name means it retries on the next scan — no target is ever
+  dropped for a buffer break.
 * **HP**: OCR of the digits on the red plate (`1081/1440`). The max is stable
   for a session, so it is learned; a stray digit read is rejected instead of
   triggering a potion. Low HP must be read twice before drinking — except

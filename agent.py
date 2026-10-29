@@ -61,8 +61,10 @@ CONFIG = HERE / "agent.json"
 # and brighter (V 239), so the band is wide on purpose.
 PINK_LO, PINK_HI = np.array([140, 45, 105]), np.array([176, 175, 255])
 # White nameplates: players and the buffer.  Bright, unsaturated text; the
-# chat is white text too, so the white scan cuts the chat box out.
-WHITE_LO, WHITE_HI = np.array([0, 0, 185]), np.array([180, 70, 255])
+# chat is white text too, so the white scan cuts the chat panel out.  The
+# S<=38 ceiling is measured, not guessed: at 45+ the dim edge of a pink mob
+# name ("Spiderz") starts passing as white.
+WHITE_LO, WHITE_HI = np.array([0, 0, 180]), np.array([180, 38, 255])
 
 DEFAULTS = {
     "mode": "melee",               # melee | ranger | gunner
@@ -98,7 +100,9 @@ DEFAULTS = {
     # --- buffer -----------------------------------------------------------
     "buffer_mode": False,          # right-hold under the nearest white name
     "buffer_every_s": 60.0,        # ... every this many seconds
-    "buffer_hold_s": 5.0,          # ... for this long
+    "buffer_hold_s": 5.0,          # ... this long per skill key
+    "buffer_keys": "1 2 3",        # cast these on the white char, "all" = 1 2 3
+                                   # (empty = plain right-hold, no casts)
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -431,10 +435,16 @@ class Perception:
         return self._plates(bgr, PINK_LO, PINK_HI)
 
     def whites(self, bgr):
-        """White nameplates (players, the buffer), nearest first."""
-        return self._plates(bgr, WHITE_LO, WHITE_HI, cut_chat=True)
+        """White nameplates (players, the buffer), nearest first.
 
-    def _plates(self, bgr, lo, hi, cut_chat=False):
+        White name text is thin anti-aliased strokes, not the bold tinted pink
+        of a mob plate: its ink density is ~0.05, so the pink 0.15 floor
+        would silently throw every white name away.
+        """
+        return self._plates(bgr, WHITE_LO, WHITE_HI,
+                            cut_chat=True, density=0.05)
+
+    def _plates(self, bgr, lo, hi, cut_chat=False, density=0.15):
         """Nameplates in one HSV band, nearest to screen centre first.
 
         Scanned at half resolution on a big frame: nameplates are 20+ px wide,
@@ -451,17 +461,18 @@ class Perception:
         sh, sw = hsv.shape[:2]
         sx, sy = sw / 1920.0, sh / 1080.0
         m = cv2.inRange(hsv, lo, hi)
-        # HUD masks, in fractions of the frame - never fixed pixels.
-        m[:max(1, int(140 * sy)), :max(1, int(150 * sx))] = 0
+        # HUD masks, in fractions of the frame - never fixed pixels.  The
+        # top-left one must reach past the minimap AND its white coordinate
+        # text (231,3966), which otherwise reads as a tiny white nameplate.
+        m[:max(1, int(180 * sy)), :max(1, int(170 * sx))] = 0
         m[int(sh * .86):, :] = 0
         m[int(sh * .66):, :int(sw * .16)] = 0
         m[int(sh * .70):, int(sw * .70):] = 0
         if cut_chat:
-            # the chat is white text too: a "white name" in the chat box is
-            # never the buffer
+            # the chat is white text too, header icons included: a "white
+            # name" in the whole chat panel is never the buffer
             bx0, by0, bx1, by1 = self.cfg["chat_box"]
-            m[int(by0 * sh):int(by1 * sh) + 1,
-              int(bx0 * sw):int(bx1 * sw) + 1] = 0
+            m[int((by0 - 0.055) * sh):, int((bx0 - 0.012) * sw):] = 0
         m = self._cut(m, hsv.shape, k)       # never see our own panel
         raw_ink = m
         m = cv2.dilate(m, np.ones((3, 3), np.uint8), 2)
@@ -515,7 +526,7 @@ class Perception:
             # real plates are solid ink (density ~0.3); jpeg fringes around
             # yellow system text are ~0.05 specks that dilation inflates
             if int(raw_ink[y:y + bh, x:x + bw].sum()) // 255 \
-                    < 0.15 * bw * bh:
+                    < density * bw * bh:
                 continue
             cx = x + bw // 2
             if not (sw * lo <= cx <= sw * hi) or not (sh * 0.03 <= y <= sh * 0.86):
@@ -1078,6 +1089,7 @@ class Brain:
         self.buffering = False
         self.buffer_until = 0.0
         self.buffer_pt = None
+        self.buffer_q = []
         self.last_buffer = 0.0
         self.last_white = 0.0
         self.last_frame = None
@@ -1094,6 +1106,7 @@ class Brain:
         # a buffer hold never survives a stop, a lost frame or lost focus
         self.buffering = False
         self.buffer_pt = None
+        self.buffer_q = []
 
     def _reset_engage(self):
         self.engaged = False
@@ -1151,32 +1164,47 @@ class Brain:
             self._reset_engage()
             self.release()
 
+    def _buffer_keys(self):
+        """Skill keys to cast on the white char: "1 2 3", "all", or empty."""
+        raw = self.cfg.get("buffer_keys", [])
+        toks = raw if isinstance(raw, (list, tuple)) \
+            else str(raw).replace(",", " ").split()
+        toks = [str(t).strip().lower() for t in toks if str(t).strip()]
+        if "all" in toks:
+            toks = ["1", "2", "3"]
+        return [t for t in toks if t in SC]
+
     def _buffer(self, rect, bgr, now):
-        """Buffer mode: right-hold under the nearest white name, on a timer.
+        """Buffer mode: right-hold a white char and cast the chosen skills.
 
         Players and the buffer show WHITE names (mobs are pink).  Every
         `buffer_every_s`, when nothing is engaged, point 30 px under the
         closest white plate - right under the name, like a mob - and hold the
-        RIGHT button for `buffer_hold_s`.  The hold lives inside the tick, so
-        HP/potion reads keep running; it just skips target acquisition until
-        it ends.  A white name that is not there means try again next tick.
+        RIGHT button (gunner style) while casting `buffer_keys` one after the
+        other, `buffer_hold_s` seconds each so a charge can finish.  With no
+        keys configured it is one plain right-hold of the same length.  The
+        hold lives inside the tick, so HP/potion reads keep running; it just
+        skips target acquisition until it ends.  A white name that is not
+        there means try again next tick.
         """
         if not self.cfg.get("buffer_mode"):
             if self.buffering:               # switched off mid-hold
                 self.release()
-                self.buffering = False
-                self.buffer_pt = None
             return False
         hold = max(0.5, float(self.cfg["buffer_hold_s"]))
         if self.buffering:
             if now >= self.buffer_until:
-                self.release()
-                self.buffering = False
-                self.buffer_pt = None
-                self.last_buffer = now
-                self.state = "buffer-done"
-                self.note(f"buffer hold done ({hold:g}s)")
-                return False
+                if self.buffer_q:
+                    k = self.buffer_q.pop(0)
+                    self.i.key(k)
+                    self.buffer_until = now + hold
+                    self.note(f"buffer cast {k} ({hold:g}s)")
+                else:
+                    self.release()
+                    self.last_buffer = now
+                    self.state = "buffer-done"
+                    self.note("buffer done")
+                    return False
             if self.buffer_pt:
                 # keep the button down and the cursor on the same spot
                 self.i.right_down(rect[0] + self.buffer_pt[0],
@@ -1193,16 +1221,28 @@ class Brain:
         if now - self.last_white < 0.40:
             return False
         self.last_white = now
+        h, w = bgr.shape[:2]
+        # your own nameplate is white too and sits right above screen centre;
+        # holding right there buffs nothing, so skip the centred plate
+        self_skip = max(30, int(round(80 * h / 768.0)))
         for wm in self.p.whites(bgr):
             if self.p.in_exclude(wm["cx"], wm["click_y"]):
+                continue
+            if math.hypot(wm["cx"] - w / 2.0,
+                          wm["click_y"] - h / 2.0) < self_skip:
                 continue
             self.buffering = True
             self.buffer_until = now + hold
             self.buffer_pt = (wm["cx"], wm["click_y"])
+            self.buffer_q = self._buffer_keys()
+            first = self.buffer_q.pop(0) if self.buffer_q else None
             self.state = "buffer"
-            self.note(f"buffer hold under white name at ({wm['cx']},"
-                      f"{wm['click_y']}) for {hold:g}s")
+            cast = f" cast {first}" if first else ""
+            self.note(f"buffer hold{cast} under white name at ({wm['cx']},"
+                      f"{wm['click_y']}) {hold:g}s each")
             self.i.right_down(rect[0] + wm["cx"], rect[1] + wm["click_y"])
+            if first:
+                self.i.key(first)
             return True
         return False
 
@@ -1470,7 +1510,7 @@ def run_gui(cfg, replay=None):
     # anchor on the game window so the panel sits on the same monitor;
     # 360 wide fits a 1366x768 laptop without covering the fight
     sw, sh = u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)
-    gw, gh = 360, 580
+    gw, gh = 360, 600
     r = client_rect()
     if r and r[2] - r[0] < sw:
         gx = max(0, min(r[2] - gw - 10, sw - gw - 8))
@@ -1598,6 +1638,20 @@ def run_gui(cfg, replay=None):
 
     entry(4, 0, "buff every", "buffer_every_s")
     entry(4, 1, "loot key", "loot_key")
+
+    tk.Label(grid, text="buff keys", bg=BG, fg=DIM, font=("Consolas", 8),
+             anchor="e").grid(row=5, column=0, sticky="e", padx=(0, 3))
+    bkeys_var = tk.StringVar(value=str(cfg.get("buffer_keys", "")))
+    vars_by_key["buffer_keys"] = bkeys_var
+    tk.Entry(grid, textvariable=bkeys_var, width=20, bg="#0d0f12", fg=FG,
+             insertbackground=FG, relief="flat",
+             font=("Consolas", 8)).grid(row=5, column=1, columnspan=3,
+                                        sticky="w", pady=0)
+
+    def commit_bkeys(*_):
+        cfg["buffer_keys"] = bkeys_var.get().strip()
+        save_cfg()
+    bkeys_var.trace_add("write", commit_bkeys)
 
     opt = tk.Frame(box, bg=BG)
     opt.pack(fill="x", padx=4, pady=(1, 0))
