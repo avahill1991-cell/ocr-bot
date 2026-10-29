@@ -13,7 +13,9 @@
   "hover_red_min": 24,
   "hover_red_delta_min": 12,
   "attack_interval_s": 0.3,
-  "skill_keys": [],
+  "skill_keys": [
+    "2"
+  ],
   "skill_every_s": 0.9,
   "track_radius": 90,
   "fight_white_min": 6,
@@ -33,7 +35,7 @@
   "loot_key": "e",
   "loot_after_hit": false,
   "loot_every_s": 1.5,
-  "buffer_keys": "1 2 3",
+  "buffer_keys": "2",
   "buffer_hold_s": 5.0,
   "buffer_gap_s": 1.0,
   "chat_watch": true,
