@@ -103,6 +103,9 @@ DEFAULTS = {
                                    # (empty = plain right-hold, no casts)
     "buffer_hold_s": 5.0,          # hold the button this long per cast
     "buffer_gap_s": 1.0,           # button-up pause between two casts
+    # --- wander -----------------------------------------------------------
+    # no names at all for this long -> walk to a fresh spot and look again
+    "wander_s": 6.0,
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -449,7 +452,7 @@ class Perception:
         cap = max(14, int(round(16 * bgr.shape[0] / 768.0)))
         return self._plates(bgr, WHITE_LO, WHITE_HI,
                             cut_chat=True, density=0.05, max_h_px=cap,
-                            min_ink_px=160)
+                            min_ink_px=48)
 
     def _plates(self, bgr, lo, hi, cut_chat=False, density=0.15,
                 max_h_px=None, min_ink_px=0):
@@ -492,10 +495,6 @@ class Perception:
         m = cv2.dilate(m, np.ones((3, 3), np.uint8), 2)
         n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         min_area = max(6, int(12 * sx * sy))
-        if min_ink_px:
-            # two 6px bright specks on a mob dilate+merge into a fake 16x12
-            # "name"; real name ink at this resolution is ~100px+ per blob
-            min_area = max(min_area, int(round(min_ink_px / (k * k))))
         # "Small Rock Merman" is a ~100px name at this resolution; after the
         # dilate it is ONE blob, so the pre-merge cap has to clear a whole
         # name or the plate is thrown away before it can be merged.
@@ -545,8 +544,12 @@ class Perception:
                 continue
             # real plates are solid ink (density ~0.3); jpeg fringes around
             # yellow system text are ~0.05 specks that dilation inflates
-            if int(raw_ink[y:y + bh, x:x + bw].sum()) // 255 \
-                    < density * bw * bh:
+            ink = int(raw_ink[y:y + bh, x:x + bw].sum()) // 255
+            if ink < density * bw * bh:
+                continue
+            # a merged line of two bright specks on a mob body carries ~10px
+            # of ink; a name that close that it can be buffed carries 15+
+            if min_ink_px and ink < min_ink_px / (k * k):
                 continue
             cx = x + bw // 2
             if not (sw * lo <= cx <= sw * hi) or not (sh * 0.03 <= y <= sh * 0.86):
@@ -1115,6 +1118,10 @@ class Brain:
         self.buffer_name = None
         self.buf_seen = None          # [cx, cy, scans] the lock must survive
         self.buf_lost = 0.0
+        self.idle_since = 0.0         # no names at all since this moment
+        self.wander_ang = 0.6
+        self.wander_step = 0
+        self.wander_wait = 0.0
         self.last_whites = []
         self.last_white = 0.0
         self.last_frame = None
@@ -1206,6 +1213,53 @@ class Brain:
             toks = ["1", "2", "3"]
         return [t for t in toks if t in SC]
 
+    def _wander(self, rect, bgr, now, mobs=None):
+        """No names at all: walk somewhere instead of standing still.
+
+        An empty field farms and buffs nothing, so after `wander_s` seconds
+        of seeing no plates the bot left-clicks open ground a few steps away
+        and keeps scanning while it walks.  Directions rotate through the
+        compass; a point is refused when it lands on the HUD, on the panel
+        or on a mob plate (a left click there would start a fight).
+        """
+        ws = max(0.0, float(self.cfg.get("wander_s", 6.0)))
+        if not ws or self.target is not None or self.buffer_phase != "idle":
+            self.idle_since = 0.0
+            return False
+        if not self.idle_since:
+            self.idle_since = now
+            return False
+        if now - self.idle_since < ws or now < self.wander_wait:
+            return False
+        if mobs is None:
+            mobs = self.p.mobs(bgr)      # buffer mode does not scan pinks
+        h, w = bgr.shape[:2]
+        for _ in range(8):
+            self.wander_ang = (self.wander_ang + 2.39996) % 6.28319
+            d = (170.0 + 70.0 * (self.wander_step % 3)) * h / 768.0
+            px = int(w / 2.0 + math.cos(self.wander_ang) * d)
+            py = int(h / 2.0 + math.sin(self.wander_ang) * d * 0.62)
+            self.wander_step += 1
+            if py < 0.14 * h or py > 0.76 * h:
+                continue
+            if px < 0.18 * w and py < 0.32 * h:      # minimap
+                continue
+            if px > 0.93 * w:                        # right-edge HUD
+                continue
+            if self.p.in_exclude(px, py):
+                continue
+            if any(abs(px - m["cx"]) < 70 and abs(py - m["click_y"]) < 70
+                   for m in mobs):
+                continue
+            self.i.click(rect[0] + px, rect[1] + py)
+            self.actions += 1
+            self.note(f"no names {now - self.idle_since:.0f}s "
+                      f"-> walk to ({px},{py})")
+            self.idle_since = now          # walk time counts as idle scanning
+            self.wander_wait = now + 1.5   # let the walk start first
+            return True
+        return False
+
     def _buffer_tick(self, rect, bgr, now):
         """Buffer mode: one cast at a time on the white char, then release.
 
@@ -1223,15 +1277,21 @@ class Brain:
             self.last_white = now
             fresh = True
             h, w = bgr.shape[:2]
-            # your own nameplate is white too and sits right above screen
-            # centre; clicking there buffs nothing, so skip it
-            self_skip = max(30, int(round(80 * h / 768.0)))
+            # a white blob hanging just under a PINK name is the mob's bright
+            # bones/armour, not a player - players never stand under a mob name
+            pk = self.p.mobs(bgr)
+            # your own nameplate is white too and is glued just above screen
+            # centre (the camera centres you), while a player close enough
+            # to buff stands taller in frame - skip only that centre box
             ws = []
             for wm in self.p.whites(bgr):
                 if self.p.in_exclude(wm["cx"], wm["click_y"]):
                     continue
-                if math.hypot(wm["cx"] - w / 2.0,
-                              wm["click_y"] - h / 2.0) < self_skip:
+                if abs(wm["cx"] - w / 2.0) <= 0.03 * w \
+                        and 0.42 * h <= wm["cy"] <= 0.54 * h:
+                    continue
+                if any(abs(wm["cx"] - q["cx"]) <= 0.06 * w
+                       and 0 <= wm["cy"] - q["cy"] <= 0.15 * h for q in pk):
                     continue
                 ws.append(wm)
             self.last_whites = ws
@@ -1298,6 +1358,9 @@ class Brain:
             self.state = "buffer-wait"
             return
         if target is None:
+            if self._wander(rect, bgr, now):
+                self.state = "wander"
+                return
             self.state = "buffer-idle"
             self.target = None
             return
@@ -1339,6 +1402,8 @@ class Brain:
             self.release()
             return
         self.last_frame = bgr
+        if self.target is not None:
+            self.idle_since = 0.0        # a live target is not an empty field
         # OCR cadence: cheap while idle, quick while a target is engaged
         self.p.hp_urgent = self.target is not None
         self.hp_ratio, _hp_cur = self.p.hp(bgr)
@@ -1447,6 +1512,9 @@ class Brain:
         if target is None:
             if not mobs:
                 self.release()
+                if self._wander(rect, bgr, now, mobs):
+                    self.state = "wander"
+                    return
                 self.state = "idle"
                 return
             self.state = "confirm"

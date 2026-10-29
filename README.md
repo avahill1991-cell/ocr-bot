@@ -38,6 +38,13 @@ the char stays near; when it walks away the hold is dropped and the next
 white name is taken. F9/stop/focus loss also lifts the button. An empty
 `buffer_keys` is a plain hold-then-release cycle.
 
+When a mode sees **no names at all** — an empty field, nobody to buff — the
+bot does not stand still: after `wander_s` (6 s) it left-clicks open ground a
+few steps away in a rotating compass direction and keeps scanning while it
+walks, stepping again if the new spot is empty too. Directions that would
+click the HUD, the panel or a mob plate are refused. `wander_s: 0` disables
+it.
+
 Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
 is ticked.
 
@@ -102,11 +109,13 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
   The whole chat panel **including its header row**, the minimap with its
   white `231,3966` coordinate text, the right-edge PK counter
   (`Human : 0 / AkKan : 9`) and the bot's own panel are cut out, and a plate
-  must carry ≥160 px of ink and be ≤16 px tall — two bright specks on a mob
-  or a white damage number ("1 1 3") must never read as a name. Your own
-  nameplate is white too and floats over screen centre, so the plate nearest
-  the centre is skipped — the bot would otherwise buff nothing but itself. A
-  lock must survive two scans before the first cast. Each cast is aim →
+  must carry ≥48 px of ink and be ≤16 px tall — two bright specks on a mob
+  or a white damage number ("1 1 3") must never read as a name. A white blob
+  hanging just under a **pink** name is the mob's bright bones, not a player,
+  and is dropped. Your own nameplate is white too and is glued just above
+  screen centre (the camera centres you), so only that centre box is skipped
+  — a player close enough to buff stands taller in frame and is still seen.
+  A lock must survive two scans before the first cast. Each cast is aim →
   right-press → key → `buffer_hold_s` of held charge → release →
   `buffer_gap_s`; the button is never held across two skills. The same char
   is tracked between casts by its last position (`track_radius`), so a

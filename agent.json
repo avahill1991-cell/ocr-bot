@@ -1,5 +1,5 @@
 {
-  "mode": "buffer",
+  "mode": "melee",
   "scan_gap_s": 0.015,
   "target_zone": [
     0.02,
@@ -14,7 +14,7 @@
   "hover_red_delta_min": 12,
   "attack_interval_s": 0.3,
   "skill_keys": [
-    "2"
+    "4"
   ],
   "skill_every_s": 0.9,
   "track_radius": 90,
@@ -33,11 +33,12 @@
     1010
   ],
   "loot_key": "e",
-  "loot_after_hit": false,
+  "loot_after_hit": true,
   "loot_every_s": 1.5,
   "buffer_keys": "2",
   "buffer_hold_s": 5.0,
   "buffer_gap_s": 1.0,
+  "wander_s": 6.0,
   "chat_watch": true,
   "chat_box": [
     0.77,
