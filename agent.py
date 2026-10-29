@@ -73,6 +73,7 @@ DEFAULTS = {
     "target_zone": [0.02, 0.88],
     "require_blue": True,          # hover first, click only on blue
     "hover_confirm_s": 0.50,       # blue must last this long before clicking
+    "confirm_stuck_s": 2.0,        # blue never came -> click the name anyway
     "hover_poll_s": 0.03,          # re-check this often once hovered
     "hover_blue_min": 60,          # blue px in the window = a real hover
     "hover_delta_min": 25,         # ... and this much over the pre-hover base
@@ -1122,6 +1123,9 @@ class Brain:
         self.wander_ang = 0.6
         self.wander_step = 0
         self.wander_wait = 0.0
+        self.noconf_since = 0.0       # mobs seen but blue never confirmed
+        self.last_hp = None
+        self.last_hurt = 0.0          # hp was seen dropping this recently
         self.last_whites = []
         self.last_white = 0.0
         self.last_frame = None
@@ -1229,7 +1233,10 @@ class Brain:
         if not self.idle_since:
             self.idle_since = now
             return False
-        if now - self.idle_since < ws or now < self.wander_wait:
+        hurt = now - self.last_hurt < 1.5     # being hit right now: move at once
+        if not hurt and now - self.idle_since < ws:
+            return False
+        if now < self.wander_wait:
             return False
         if mobs is None:
             mobs = self.p.mobs(bgr)      # buffer mode does not scan pinks
@@ -1253,8 +1260,12 @@ class Brain:
                 continue
             self.i.click(rect[0] + px, rect[1] + py)
             self.actions += 1
-            self.note(f"no names {now - self.idle_since:.0f}s "
-                      f"-> walk to ({px},{py})")
+            if hurt:
+                self.note(f"hit with no target -> walk to ({px},{py})")
+                self.last_hurt = 0.0
+            else:
+                self.note(f"no names {now - self.idle_since:.0f}s "
+                          f"-> walk to ({px},{py})")
             self.idle_since = now          # walk time counts as idle scanning
             self.wander_wait = now + 1.5   # let the walk start first
             return True
@@ -1407,6 +1418,13 @@ class Brain:
         # OCR cadence: cheap while idle, quick while a target is engaged
         self.p.hp_urgent = self.target is not None
         self.hp_ratio, _hp_cur = self.p.hp(bgr)
+        # hp going DOWN while nothing is engaged: something is hitting you
+        # from off-screen or under a HUD cut - movement beats standing still
+        if (self.hp_ratio is not None and self.last_hp is not None
+                and self.hp_ratio < self.last_hp - 0.02):
+            self.last_hurt = now
+        if self.hp_ratio is not None:
+            self.last_hp = self.hp_ratio
         if self.cfg["mode"] != "buffer":
             self.p.chat(bgr)     # exp lines confirm kills - not needed here
 
@@ -1512,6 +1530,7 @@ class Brain:
         if target is None:
             if not mobs:
                 self.release()
+                self.noconf_since = 0.0
                 if self._wander(rect, bgr, now, mobs):
                     self.state = "wander"
                     return
@@ -1519,13 +1538,17 @@ class Brain:
                 return
             self.state = "confirm"
             first = True
+            # blue never came for 2 s while the mob keeps hitting: click on
+            # the name alone instead of standing there being chewed
+            force = bool(self.noconf_since) and now - self.noconf_since \
+                > float(self.cfg.get("confirm_stuck_s", 2.0))
             for m in mobs[:3]:
                 if self.p.in_exclude(m["cx"], m["click_y"]):
                     continue
-                if self._hover_failed_recently(m):
+                if self._hover_failed_recently(m) and not force:
                     continue
                 ok, blue = True, 0
-                if self.cfg["require_blue"]:
+                if self.cfg["require_blue"] and not force:
                     # the tick frame is a valid pre-hover baseline only before
                     # the cursor has been sent anywhere this tick
                     ok, blue = self.p.confirm(rect, self.i, m,
@@ -1551,13 +1574,18 @@ class Brain:
                 how = "hold" if self.cfg["mode"] == "gunner" else "click"
                 self.note(f"hover lock ({target['cx']},{target['click_y']}) "
                           f"b={blue} r={target.get('red', '-')} -> {how}")
+                if force:
+                    self.note("blue never came - clicked the name alone")
                 break
             if target is None:
                 self.release()
+                if not self.noconf_since:
+                    self.noconf_since = now
                 self.state = "no-confirm"
                 return
 
         self.target = target
+        self.noconf_since = 0.0
         now = time.time()
         mode = self.cfg["mode"]
         if self.in_fight:

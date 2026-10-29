@@ -45,6 +45,12 @@ walks, stepping again if the new spot is empty too. Directions that would
 click the HUD, the panel or a mob plate are refused. `wander_s: 0` disables
 it.
 
+Two more anti-idle rules: if mobs are on screen but the blue hover confirm
+never passes for `confirm_stuck_s` (2 s), the name alone is clicked instead
+of standing there being chewed; and if HP is seen dropping while nothing at
+all is visible — something hitting you from off-screen or under a HUD cut —
+the bot walks at once instead of waiting out `wander_s`.
+
 Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
 is ticked.
 
