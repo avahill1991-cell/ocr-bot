@@ -102,7 +102,7 @@ DEFAULTS = {
     "buffer_keys": "1 2 3",        # cast these in a loop, "all" = 1 2 3
                                    # (empty = plain right-hold, no casts)
     "buffer_hold_s": 5.0,          # hold the button this long per cast
-    "buffer_gap_s": 0.3,           # released pause between two casts
+    "buffer_gap_s": 1.0,           # button-up pause between two casts
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -315,8 +315,11 @@ class Input:
             self._mouse(0x0008)           # RIGHTDOWN
             self.right_held = True
 
-    def right_up(self):
-        if self.right_held:
+    def right_up(self, force=False):
+        # force: fire the UP even when the flag says it is already up.  The
+        # flag desyncs when a hand click lands on the button mid-hold, and a
+        # missed UP leaves the game charging forever.
+        if self.right_held or force:
             self._mouse(0x0010)           # RIGHTUP
             self.right_held = False
 
@@ -439,12 +442,17 @@ class Perception:
 
         White name text is thin anti-aliased strokes, not the bold tinted pink
         of a mob plate: its ink density is ~0.05, so the pink 0.15 floor
-        would silently throw every white name away.
+        would silently throw every white name away.  The height cap is what
+        keeps the big white DAMAGE numbers ("1 1 3", ~25 px tall) and cast
+        effect rings out - a name is ~14 px at 768.
         """
+        cap = max(14, int(round(16 * bgr.shape[0] / 768.0)))
         return self._plates(bgr, WHITE_LO, WHITE_HI,
-                            cut_chat=True, density=0.05)
+                            cut_chat=True, density=0.05, max_h_px=cap,
+                            min_ink_px=160)
 
-    def _plates(self, bgr, lo, hi, cut_chat=False, density=0.15):
+    def _plates(self, bgr, lo, hi, cut_chat=False, density=0.15,
+                max_h_px=None, min_ink_px=0):
         """Nameplates in one HSV band, nearest to screen centre first.
 
         Scanned at half resolution on a big frame: nameplates are 20+ px wide,
@@ -468,9 +476,15 @@ class Perception:
         m[int(sh * .86):, :] = 0
         m[int(sh * .66):, :int(sw * .16)] = 0
         m[int(sh * .70):, int(sw * .70):] = 0
+        # right-edge PK counter ("Human : 0 / AkKan : 9") is white HUD text
+        m[int(sh * .30):int(sh * .62), int(sw * .94):] = 0
         if cut_chat:
             # the chat is white text too, header icons included: a "white
-            # name" in the whole chat panel is never the buffer
+            # name" in the whole chat panel is never the buffer.  The header
+            # labels sit at ~0.81-0.87h, above the 0.86h full-width cut and
+            # left of the panel cut, so they read as plates and lock the
+            # buffer onto the chat panel / bare ground - cut that band too.
+            m[int(sh * .80):int(sh * .90), :] = 0
             bx0, by0, bx1, by1 = self.cfg["chat_box"]
             m[int((by0 - 0.055) * sh):, int((bx0 - 0.012) * sw):] = 0
         m = self._cut(m, hsv.shape, k)       # never see our own panel
@@ -478,11 +492,17 @@ class Perception:
         m = cv2.dilate(m, np.ones((3, 3), np.uint8), 2)
         n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         min_area = max(6, int(12 * sx * sy))
+        if min_ink_px:
+            # two 6px bright specks on a mob dilate+merge into a fake 16x12
+            # "name"; real name ink at this resolution is ~100px+ per blob
+            min_area = max(min_area, int(round(min_ink_px / (k * k))))
         # "Small Rock Merman" is a ~100px name at this resolution; after the
         # dilate it is ONE blob, so the pre-merge cap has to clear a whole
         # name or the plate is thrown away before it can be merged.
         max_part_w = max(40, int(260 * sx))
         max_part_h = max(12, int(20 * sy))
+        if max_h_px:
+            max_part_h = max(4, int(round(max_h_px / k)))
         parts = [[int(s[0]), int(s[1]), int(s[2]), int(s[3])]
                  for s in stats[1:]
                  if s[4] >= min_area and s[3] <= max_part_h
@@ -1093,6 +1113,7 @@ class Brain:
         self.buffer_pt = None
         self.buffer_q = []
         self.buffer_name = None
+        self.buf_seen = None          # [cx, cy, scans] the lock must survive
         self.buf_lost = 0.0
         self.last_whites = []
         self.last_white = 0.0
@@ -1196,9 +1217,11 @@ class Brain:
         the hold is dropped at once and the next white name is taken.
         """
         hold = max(0.5, float(self.cfg["buffer_hold_s"]))
-        gap = max(0.05, float(self.cfg.get("buffer_gap_s", 0.3)))
+        gap = max(0.2, float(self.cfg.get("buffer_gap_s", 1.0)))
+        fresh = False
         if now - self.last_white >= 0.15:
             self.last_white = now
+            fresh = True
             h, w = bgr.shape[:2]
             # your own nameplate is white too and sits right above screen
             # centre; clicking there buffs nothing, so skip it
@@ -1228,29 +1251,40 @@ class Brain:
         if target is None and self.last_whites:
             target = self.last_whites[0]        # nearest to screen centre
         if target:
+            sx, sy = target["cx"], target["cy"]
+            if fresh:                       # count SCANS, not ticks
+                if self.buf_seen and abs(self.buf_seen[0] - sx) <= 15 \
+                        and abs(self.buf_seen[1] - sy) <= 15:
+                    self.buf_seen[2] += 1
+                else:
+                    self.buf_seen = [sx, sy, 1]
             self.buffer_name = dict(target)
             self.buf_lost = 0.0
             self.target = dict(target, blue=0)
-        elif self.buffer_phase != "idle":
-            if not self.buf_lost:
-                self.buf_lost = now
-            elif now - self.buf_lost > 1.0:
-                # the char is gone: lift the button now, do not spam a point
-                self.note("buffer char gone - next white name")
-                self.release()
-                self.target = None
-                self.buffer_name = None
-                self.buffer_wait = now + 0.5
-                self.state = "buffer-wait"
-                self.last_white = 0.0        # rescan at once
-                return
+        else:
+            if fresh:
+                self.buf_seen = None
+            if self.buffer_phase != "idle":
+                if not self.buf_lost:
+                    self.buf_lost = now
+                elif now - self.buf_lost > 0.4:
+                    # the char is gone: lift the button now, do not spam a point
+                    self.note("buffer char gone - next white name")
+                    self.release()
+                    self.target = None
+                    self.buffer_name = None
+                    self.buffer_wait = now + 0.5
+                    self.state = "buffer-wait"
+                    self.last_white = 0.0        # rescan at once
+                    return
 
         if self.buffer_phase == "hold":
             if now < self.buffer_until:
                 self.i.right_down()          # keep it down, do not move
                 self.state = "buffer"
                 return
-            self.i.right_up()                # the charge's few seconds are up
+            self.i.right_up(force=True)      # the charge's few seconds are up
+            self.note(f"buffer release - button up {gap:g}s")
             self.buffer_phase = "gap"
             self.buffer_until = now + gap
             self.state = "buffer-gap"
@@ -1266,6 +1300,10 @@ class Brain:
         if target is None:
             self.state = "buffer-idle"
             self.target = None
+            return
+        if self.buf_seen and self.buf_seen[2] < 2:
+            # seen in one scan only: a damage number or a flicker, not a char
+            self.state = "buffer-watch"
             return
 
         if not self.buffer_q:

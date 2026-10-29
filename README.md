@@ -32,7 +32,7 @@ Each class is a mode in the panel, and buffer is the fourth:
 Buffer mode is not a farming helper — it replaces the mob loop entirely.
 Each skill is its own cast: glide 30 px under the white plate, press the
 RIGHT button, cast the key, hold `buffer_hold_s` so a charge finishes, then
-**release the button**, pause `buffer_gap_s` (0.3 s), re-aim at the
+**release the button**, pause `buffer_gap_s` (1 s), re-aim at the
 character's current spot and cast the next key. The chosen keys loop while
 the char stays near; when it walks away the hold is dropped and the next
 white name is taken. F9/stop/focus loss also lifts the button. An empty
@@ -99,15 +99,19 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
 * **Buffer**: white nameplates are found with a second half-resolution scan
   (V ≥ 180, S ≤ 38, ink density 0.05 — white text is thin, the pink 0.15
   floor throws it away; S 45+ lets the dim edge of a pink "Spiderz" through).
-  The whole chat panel, the minimap with its white `231,3966` coordinate text,
-  and the bot's own panel are cut out. Your own nameplate is white too and
-  floats over screen centre, so the plate nearest the centre is skipped — the
-  bot would otherwise buff nothing but itself. Each cast is aim → right-press
-  → key → `buffer_hold_s` of held charge → release → `buffer_gap_s`; the
-  button is never held across two skills. The same char is tracked between
-  casts by its last position (`track_radius`), so a passing white name cannot
-  steal the hold; if the char is gone for a second the hold ends and the next
-  white name is taken.
+  The whole chat panel **including its header row**, the minimap with its
+  white `231,3966` coordinate text, the right-edge PK counter
+  (`Human : 0 / AkKan : 9`) and the bot's own panel are cut out, and a plate
+  must carry ≥160 px of ink and be ≤16 px tall — two bright specks on a mob
+  or a white damage number ("1 1 3") must never read as a name. Your own
+  nameplate is white too and floats over screen centre, so the plate nearest
+  the centre is skipped — the bot would otherwise buff nothing but itself. A
+  lock must survive two scans before the first cast. Each cast is aim →
+  right-press → key → `buffer_hold_s` of held charge → release →
+  `buffer_gap_s`; the button is never held across two skills. The same char
+  is tracked between casts by its last position (`track_radius`), so a
+  passing white name cannot steal the hold; if the char is gone for half a
+  second the hold ends and the next white name is taken.
 * **HP**: OCR of the digits on the red plate (`1081/1440`). The max is stable
   for a session, so it is learned; a stray digit read is rejected instead of
   triggering a potion. Low HP must be read twice before drinking — except
