@@ -101,7 +101,8 @@ DEFAULTS = {
     # buffer mode: right-hold on the nearest white name (players/the buffer)
     "buffer_keys": "1 2 3",        # cast these in a loop, "all" = 1 2 3
                                    # (empty = plain right-hold, no casts)
-    "buffer_hold_s": 5.0,          # seconds per skill key (charge time)
+    "buffer_hold_s": 5.0,          # hold the button this long per cast
+    "buffer_gap_s": 0.3,           # released pause between two casts
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -1086,9 +1087,12 @@ class Brain:
         self.engage_at = 0.0
         self.fought_at = 0.0
         self.buffering = False
+        self.buffer_phase = "idle"     # idle | hold | gap
         self.buffer_until = 0.0
+        self.buffer_wait = 0.0
         self.buffer_pt = None
         self.buffer_q = []
+        self.buffer_name = None
         self.buf_lost = 0.0
         self.last_whites = []
         self.last_white = 0.0
@@ -1105,6 +1109,7 @@ class Brain:
         self.i.right_up()
         # a buffer hold never survives a stop, a lost frame or lost focus
         self.buffering = False
+        self.buffer_phase = "idle"
         self.buffer_pt = None
         self.buffer_q = []
 
@@ -1181,21 +1186,22 @@ class Brain:
         return [t for t in toks if t in SC]
 
     def _buffer_tick(self, rect, bgr, now):
-        """Buffer mode: buff the white char, the way gunner holds a mob.
+        """Buffer mode: one cast at a time on the white char, then release.
 
-        White names are players and the buffer (mobs are pink).  Glide 30 px
-        under the nearest white plate, hold the RIGHT button on that char and
-        press the chosen `buffer_keys` in a loop, one key every
-        `buffer_hold_s` seconds so a charge can finish.  The button never
-        lifts between keys; it is released only when the char walks away or
-        the bot stops - then the next white name is taken.
+        White names are players and the buffer (mobs are pink).  For each
+        chosen skill: re-aim 30 px under the character, press the RIGHT
+        button there, cast the key, hold `buffer_hold_s` so a charge
+        finishes, then RELEASE and wait `buffer_gap_s` before the next key.
+        The chosen keys loop while the char stays near; when it walks away
+        the hold is dropped at once and the next white name is taken.
         """
         hold = max(0.5, float(self.cfg["buffer_hold_s"]))
+        gap = max(0.05, float(self.cfg.get("buffer_gap_s", 0.3)))
         if now - self.last_white >= 0.15:
             self.last_white = now
             h, w = bgr.shape[:2]
             # your own nameplate is white too and sits right above screen
-            # centre; holding right there buffs nothing, so skip it
+            # centre; clicking there buffs nothing, so skip it
             self_skip = max(30, int(round(80 * h / 768.0)))
             ws = []
             for wm in self.p.whites(bgr):
@@ -1208,54 +1214,75 @@ class Brain:
             self.last_whites = ws
             self.last_mobs = ws          # the preview outlines what it sees
         self.in_fight = False
-        if self.buffering and self.buffer_pt:
-            tr = self.cfg["track_radius"]
-            px, py = self.buffer_pt
+
+        # stay on the same char while it is near its last seen spot
+        tr = self.cfg["track_radius"]
+        target = None
+        if self.buffer_name:
             near = [w for w in self.last_whites
-                    if abs(w["cx"] - px) <= tr and abs(w["cy"] - py) <= tr]
+                    if abs(w["cx"] - self.buffer_name["cx"]) <= tr
+                    and abs(w["cy"] - self.buffer_name["cy"]) <= tr]
             if near:
-                self.buf_lost = 0.0
-            elif not self.buf_lost:
+                target = min(near, key=lambda w: abs(w["cx"] - self.buffer_name["cx"])
+                             + abs(w["cy"] - self.buffer_name["cy"]))
+        if target is None and self.last_whites:
+            target = self.last_whites[0]        # nearest to screen centre
+        if target:
+            self.buffer_name = dict(target)
+            self.buf_lost = 0.0
+            self.target = dict(target, blue=0)
+        elif self.buffer_phase != "idle":
+            if not self.buf_lost:
                 self.buf_lost = now
             elif now - self.buf_lost > 1.0:
+                # the char is gone: lift the button now, do not spam a point
                 self.note("buffer char gone - next white name")
                 self.release()
                 self.target = None
+                self.buffer_name = None
+                self.buffer_wait = now + 0.5
                 self.state = "buffer-wait"
-                self.last_white = 0.0    # rescan at once
+                self.last_white = 0.0        # rescan at once
                 return
-            if now >= self.buffer_until:
-                if not self.buffer_q:
-                    self.buffer_q = self._buffer_keys()
-                if self.buffer_q:
-                    k = self.buffer_q.pop(0)
-                    self.i.key(k)
-                    self.actions += 1
-                    self.note(f"buffer cast {k}")
-                self.buffer_until = now + hold
-            self.i.right_down()          # keep it down, do not move
-            self.state = "buffer"
+
+        if self.buffer_phase == "hold":
+            if now < self.buffer_until:
+                self.i.right_down()          # keep it down, do not move
+                self.state = "buffer"
+                return
+            self.i.right_up()                # the charge's few seconds are up
+            self.buffer_phase = "gap"
+            self.buffer_until = now + gap
+            self.state = "buffer-gap"
             return
-        if not self.last_whites:
+        if self.buffer_phase == "gap":
+            if now < self.buffer_until:
+                self.state = "buffer-gap"
+                return
+            self.buffer_phase = "idle"
+        if now < self.buffer_wait:
+            self.state = "buffer-wait"
+            return
+        if target is None:
             self.state = "buffer-idle"
             self.target = None
             return
-        wm = self.last_whites[0]
-        keys = self._buffer_keys()
+
+        if not self.buffer_q:
+            self.buffer_q = self._buffer_keys()
+        k = self.buffer_q.pop(0) if self.buffer_q else None
+        self.buffer_pt = (target["cx"], target["click_y"])
         self.buffering = True
-        self.buffer_pt = (wm["cx"], wm["click_y"])
-        self.buffer_q = keys[1:]
+        self.buffer_phase = "hold"
         self.buffer_until = now + hold
-        self.buf_lost = 0.0
-        self.target = dict(wm, blue=0)
         self.state = "buffer"
-        cast = f" cast {keys[0]}" if keys else ""
-        self.note(f"buffer target ({wm['cx']},{wm['click_y']}){cast}, "
-                  f"{hold:g}s each")
-        self.i.right_down(rect[0] + wm["cx"], rect[1] + wm["click_y"])
-        if keys:
-            self.i.key(keys[0])
+        self.i.right_down(rect[0] + target["cx"],
+                          rect[1] + target["click_y"])
+        if k:
+            self.i.key(k)
             self.actions += 1
+            self.note(f"buffer cast {k} {hold:g}s at "
+                      f"({target['cx']},{target['click_y']})")
 
     # -- one tick --------------------------------------------------------
     def tick(self, rect):

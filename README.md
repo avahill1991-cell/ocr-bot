@@ -27,13 +27,16 @@ Each class is a mode in the panel, and buffer is the fourth:
 | `melee` | left-click a pink mob, cycle skill keys on a cadence |
 | `ranger` | same click, separate cadence |
 | `gunner` | no left click at all: holds the RIGHT button on the locked mob until it dies |
-| `buffer` | no mobs: holds the RIGHT button on the nearest **white** name (players/the buffer) and casts `buffer_keys` (`"1 2 3"` or `all`) in a loop, `buffer_hold_s` (5 s) each so a charge can finish |
+| `buffer` | no mobs: casts `buffer_keys` (`"1 2 3"` or `all`) on the nearest **white** name (players/the buffer) — one right-hold + cast, `buffer_hold_s` (5 s) each, release, next key |
 
 Buffer mode is not a farming helper — it replaces the mob loop entirely.
-It glides 30 px under the white plate, presses the right button on that
-character once and keeps it held while cycling the chosen skills; the button
-is released only when the character walks away (then the next white name is
-taken), or on F9/stop/focus loss. An empty `buffer_keys` is a plain hold.
+Each skill is its own cast: glide 30 px under the white plate, press the
+RIGHT button, cast the key, hold `buffer_hold_s` so a charge finishes, then
+**release the button**, pause `buffer_gap_s` (0.3 s), re-aim at the
+character's current spot and cast the next key. The chosen keys loop while
+the char stays near; when it walks away the hold is dropped and the next
+white name is taken. F9/stop/focus loss also lifts the button. An empty
+`buffer_keys` is a plain hold-then-release cycle.
 
 Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
 is ticked.
@@ -99,12 +102,12 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
   The whole chat panel, the minimap with its white `231,3966` coordinate text,
   and the bot's own panel are cut out. Your own nameplate is white too and
   floats over screen centre, so the plate nearest the centre is skipped — the
-  bot would otherwise buff nothing but itself. The right-hold keeps the cursor
-  on the same client point; each chosen skill key is pressed once at the start
-  of its `buffer_hold_s` slot and the button stays down across every cast, so
-  a charge is never cancelled by a release. The white scan is cached for
-  0.15 s; if the character walks out of `track_radius` for a second the hold
-  ends and the next white name is taken.
+  bot would otherwise buff nothing but itself. Each cast is aim → right-press
+  → key → `buffer_hold_s` of held charge → release → `buffer_gap_s`; the
+  button is never held across two skills. The same char is tracked between
+  casts by its last position (`track_radius`), so a passing white name cannot
+  steal the hold; if the char is gone for a second the hold ends and the next
+  white name is taken.
 * **HP**: OCR of the digits on the red plate (`1081/1440`). The max is stable
   for a session, so it is learned; a stray digit read is rejected instead of
   triggering a potion. Low HP must be read twice before drinking — except
