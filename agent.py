@@ -67,7 +67,7 @@ PINK_LO, PINK_HI = np.array([140, 45, 105]), np.array([176, 175, 255])
 WHITE_LO, WHITE_HI = np.array([0, 0, 180]), np.array([180, 38, 255])
 
 DEFAULTS = {
-    "mode": "melee",               # melee | ranger | gunner
+    "mode": "melee",               # melee | ranger | gunner | buffer
     # --- the loop -------------------------------------------------------
     "scan_gap_s": 0.015,
     "target_zone": [0.02, 0.88],
@@ -98,11 +98,10 @@ DEFAULTS = {
     "loot_after_hit": False,
     "loot_every_s": 1.5,
     # --- buffer -----------------------------------------------------------
-    "buffer_mode": False,          # right-hold under the nearest white name
-    "buffer_every_s": 60.0,        # ... every this many seconds
-    "buffer_hold_s": 5.0,          # ... this long per skill key
-    "buffer_keys": "1 2 3",        # cast these on the white char, "all" = 1 2 3
+    # buffer mode: right-hold on the nearest white name (players/the buffer)
+    "buffer_keys": "1 2 3",        # cast these in a loop, "all" = 1 2 3
                                    # (empty = plain right-hold, no casts)
+    "buffer_hold_s": 5.0,          # seconds per skill key (charge time)
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -1090,7 +1089,8 @@ class Brain:
         self.buffer_until = 0.0
         self.buffer_pt = None
         self.buffer_q = []
-        self.last_buffer = 0.0
+        self.buf_lost = 0.0
+        self.last_whites = []
         self.last_white = 0.0
         self.last_frame = None
         self.last_mobs = []
@@ -1107,6 +1107,12 @@ class Brain:
         self.buffering = False
         self.buffer_pt = None
         self.buffer_q = []
+
+    def drop_target(self):
+        """Mode switch: no target from the old mode survives."""
+        self.target = None
+        self._reset_engage()
+        self.release()
 
     def _reset_engage(self):
         self.engaged = False
@@ -1174,77 +1180,82 @@ class Brain:
             toks = ["1", "2", "3"]
         return [t for t in toks if t in SC]
 
-    def _buffer(self, rect, bgr, now):
-        """Buffer mode: right-hold a white char and cast the chosen skills.
+    def _buffer_tick(self, rect, bgr, now):
+        """Buffer mode: buff the white char, the way gunner holds a mob.
 
-        Players and the buffer show WHITE names (mobs are pink).  Every
-        `buffer_every_s`, when nothing is engaged, point 30 px under the
-        closest white plate - right under the name, like a mob - and hold the
-        RIGHT button (gunner style) while casting `buffer_keys` one after the
-        other, `buffer_hold_s` seconds each so a charge can finish.  With no
-        keys configured it is one plain right-hold of the same length.  The
-        hold lives inside the tick, so HP/potion reads keep running; it just
-        skips target acquisition until it ends.  A white name that is not
-        there means try again next tick.
+        White names are players and the buffer (mobs are pink).  Glide 30 px
+        under the nearest white plate, hold the RIGHT button on that char and
+        press the chosen `buffer_keys` in a loop, one key every
+        `buffer_hold_s` seconds so a charge can finish.  The button never
+        lifts between keys; it is released only when the char walks away or
+        the bot stops - then the next white name is taken.
         """
-        if not self.cfg.get("buffer_mode"):
-            if self.buffering:               # switched off mid-hold
-                self.release()
-            return False
         hold = max(0.5, float(self.cfg["buffer_hold_s"]))
-        if self.buffering:
+        if now - self.last_white >= 0.15:
+            self.last_white = now
+            h, w = bgr.shape[:2]
+            # your own nameplate is white too and sits right above screen
+            # centre; holding right there buffs nothing, so skip it
+            self_skip = max(30, int(round(80 * h / 768.0)))
+            ws = []
+            for wm in self.p.whites(bgr):
+                if self.p.in_exclude(wm["cx"], wm["click_y"]):
+                    continue
+                if math.hypot(wm["cx"] - w / 2.0,
+                              wm["click_y"] - h / 2.0) < self_skip:
+                    continue
+                ws.append(wm)
+            self.last_whites = ws
+            self.last_mobs = ws          # the preview outlines what it sees
+        self.in_fight = False
+        if self.buffering and self.buffer_pt:
+            tr = self.cfg["track_radius"]
+            px, py = self.buffer_pt
+            near = [w for w in self.last_whites
+                    if abs(w["cx"] - px) <= tr and abs(w["cy"] - py) <= tr]
+            if near:
+                self.buf_lost = 0.0
+            elif not self.buf_lost:
+                self.buf_lost = now
+            elif now - self.buf_lost > 1.0:
+                self.note("buffer char gone - next white name")
+                self.release()
+                self.target = None
+                self.state = "buffer-wait"
+                self.last_white = 0.0    # rescan at once
+                return
             if now >= self.buffer_until:
+                if not self.buffer_q:
+                    self.buffer_q = self._buffer_keys()
                 if self.buffer_q:
                     k = self.buffer_q.pop(0)
                     self.i.key(k)
-                    self.buffer_until = now + hold
-                    self.note(f"buffer cast {k} ({hold:g}s)")
-                else:
-                    self.release()
-                    self.last_buffer = now
-                    self.state = "buffer-done"
-                    self.note("buffer done")
-                    return False
-            if self.buffer_pt:
-                # keep the button down and the cursor on the same spot
-                self.i.right_down(rect[0] + self.buffer_pt[0],
-                                  rect[1] + self.buffer_pt[1])
+                    self.actions += 1
+                    self.note(f"buffer cast {k}")
+                self.buffer_until = now + hold
+            self.i.right_down()          # keep it down, do not move
             self.state = "buffer"
-            return True
-        if self.last_buffer == 0.0:
-            self.last_buffer = now           # first hold after one interval
-            return False
-        if now - self.last_buffer < float(self.cfg["buffer_every_s"]):
-            return False
-        # white plates are a second half-res scan; do not repeat it every
-        # tick while the interval is due and no white name is on screen
-        if now - self.last_white < 0.40:
-            return False
-        self.last_white = now
-        h, w = bgr.shape[:2]
-        # your own nameplate is white too and sits right above screen centre;
-        # holding right there buffs nothing, so skip the centred plate
-        self_skip = max(30, int(round(80 * h / 768.0)))
-        for wm in self.p.whites(bgr):
-            if self.p.in_exclude(wm["cx"], wm["click_y"]):
-                continue
-            if math.hypot(wm["cx"] - w / 2.0,
-                          wm["click_y"] - h / 2.0) < self_skip:
-                continue
-            self.buffering = True
-            self.buffer_until = now + hold
-            self.buffer_pt = (wm["cx"], wm["click_y"])
-            self.buffer_q = self._buffer_keys()
-            first = self.buffer_q.pop(0) if self.buffer_q else None
-            self.state = "buffer"
-            cast = f" cast {first}" if first else ""
-            self.note(f"buffer hold{cast} under white name at ({wm['cx']},"
-                      f"{wm['click_y']}) {hold:g}s each")
-            self.i.right_down(rect[0] + wm["cx"], rect[1] + wm["click_y"])
-            if first:
-                self.i.key(first)
-            return True
-        return False
+            return
+        if not self.last_whites:
+            self.state = "buffer-idle"
+            self.target = None
+            return
+        wm = self.last_whites[0]
+        keys = self._buffer_keys()
+        self.buffering = True
+        self.buffer_pt = (wm["cx"], wm["click_y"])
+        self.buffer_q = keys[1:]
+        self.buffer_until = now + hold
+        self.buf_lost = 0.0
+        self.target = dict(wm, blue=0)
+        self.state = "buffer"
+        cast = f" cast {keys[0]}" if keys else ""
+        self.note(f"buffer target ({wm['cx']},{wm['click_y']}){cast}, "
+                  f"{hold:g}s each")
+        self.i.right_down(rect[0] + wm["cx"], rect[1] + wm["click_y"])
+        if keys:
+            self.i.key(keys[0])
+            self.actions += 1
 
     # -- one tick --------------------------------------------------------
     def tick(self, rect):
@@ -1266,7 +1277,8 @@ class Brain:
         # OCR cadence: cheap while idle, quick while a target is engaged
         self.p.hp_urgent = self.target is not None
         self.hp_ratio, _hp_cur = self.p.hp(bgr)
-        self.p.chat(bgr)
+        if self.cfg["mode"] != "buffer":
+            self.p.chat(bgr)     # exp lines confirm kills - not needed here
 
         # potion: the reading must be VALID and low twice, so one misread
         # digit cannot drink a potion at full health
@@ -1309,6 +1321,11 @@ class Brain:
         else:
             self.low_since = None
             self.hp_hist = []
+
+        # ---- buffer mode: buff the white char, the mob loop is skipped -----
+        if self.cfg["mode"] == "buffer":
+            self._buffer_tick(rect, bgr, now)
+            return
 
         # scans are throttled so one frame is not decoded three times
         if now - self.last_scan >= 0.08:
@@ -1360,10 +1377,6 @@ class Brain:
             else:
                 self._track(now, mobs)
                 target = self.target
-
-        # ---- buffer break between targets --------------------------------
-        if target is None and self._buffer(rect, bgr, time.time()):
-            return
 
         # ---- otherwise: find, hover, blue? click --------------------------
         if target is None:
@@ -1554,7 +1567,7 @@ def run_gui(cfg, replay=None):
              font=("Consolas", 8, "bold")).pack(side="left", padx=(0, 4))
     mode_var = tk.StringVar(value=cfg["mode"])
     mode_btns = {}
-    for m in ("melee", "ranger", "gunner"):
+    for m in ("melee", "ranger", "gunner", "buffer"):
         b = tk.Button(mrow, text=m.upper(), width=7, relief="flat",
                       font=("Consolas", 8, "bold"), bg="#22262d", fg=DIM,
                       command=lambda mm=m: set_mode(mm))
@@ -1570,7 +1583,7 @@ def run_gui(cfg, replay=None):
     def set_mode(m):
         mode_var.set(m)
         cfg["mode"] = m
-        brain.release()
+        brain.drop_target()
         paint_mode()
         save_cfg()
 
@@ -1636,8 +1649,7 @@ def run_gui(cfg, replay=None):
         save_cfg()
     skills_var.trace_add("write", commit_skills)
 
-    entry(4, 0, "buff every", "buffer_every_s")
-    entry(4, 1, "loot key", "loot_key")
+    entry(4, 0, "loot key", "loot_key")
 
     tk.Label(grid, text="buff keys", bg=BG, fg=DIM, font=("Consolas", 8),
              anchor="e").grid(row=5, column=0, sticky="e", padx=(0, 3))
@@ -1668,7 +1680,6 @@ def run_gui(cfg, replay=None):
 
     toggle("require_blue", "require blue")
     toggle("loot_after_hit", "loot")
-    toggle("buffer_mode", "buffer")
 
     brow = tk.Frame(box, bg=BG)
     brow.pack(fill="x", padx=4, pady=(0, 4))
@@ -1858,7 +1869,8 @@ def run_gui(cfg, replay=None):
         st = brain.status()
         state_lbl.config(text=st["state"],
                          fg=(ACCENT if st["state"] in
-                             ("attack", "shooting", "drawing", "re-click")
+                             ("attack", "shooting", "drawing", "re-click",
+                              "buffer")
                              else DIM))
         hp = st["hp"]
         hp_canvas.delete("all")
@@ -1891,7 +1903,9 @@ def run_gui(cfg, replay=None):
                     if rect is not None:
                         bgr = percept.grab(rect)
                         if bgr is not None:
-                            plist = percept.mobs(bgr)
+                            plist = (percept.whites(bgr)
+                                     if cfg["mode"] == "buffer"
+                                     else percept.mobs(bgr))
             if bgr is not None and bgr is not preview[1]:
                 preview[0], preview[1] = now, bgr
                 try:

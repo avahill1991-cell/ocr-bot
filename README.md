@@ -20,22 +20,20 @@ pink name found -> cursor to the body (30 px under the plate)
   no  -> skip that name for a moment, try the next
 ```
 
-Each of the three classes uses that same loop:
+Each class is a mode in the panel, and buffer is the fourth:
 
 | mode | behaviour |
 |---|---|
-| `melee` | left-click, cycle skill keys on a cadence |
+| `melee` | left-click a pink mob, cycle skill keys on a cadence |
 | `ranger` | same click, separate cadence |
-| `gunner` | no left click at all: holds the RIGHT button on the locked target until it dies |
+| `gunner` | no left click at all: holds the RIGHT button on the locked mob until it dies |
+| `buffer` | no mobs: holds the RIGHT button on the nearest **white** name (players/the buffer) and casts `buffer_keys` (`"1 2 3"` or `all`) in a loop, `buffer_hold_s` (5 s) each so a charge can finish |
 
-Between targets, on a timer, the bot also takes a **buffer break**: every
-`buffer_every_s` (default 60 s) it points 30 px under the nearest **white**
-nameplate — players and the buffer are white, mobs are pink — holds the RIGHT
-button on that character gunner-style, and casts the chosen `buffer_keys`
-(`"1 2 3"` or `all`; empty = plain hold) one after another, `buffer_hold_s`
-(5 s) each so a charge can finish. Then it resumes farming. It never
-interrupts an engaged target. Toggle it with `buffer_mode` (on by default in
-`agent.json`); the keys/hold/every values are in the panel.
+Buffer mode is not a farming helper — it replaces the mob loop entirely.
+It glides 30 px under the white plate, presses the right button on that
+character once and keeps it held while cycling the chosen skills; the button
+is released only when the character walks away (then the next white name is
+taken), or on F9/stop/focus loss. An empty `buffer_keys` is a plain hold.
 
 Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
 is ticked.
@@ -102,11 +100,11 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
   and the bot's own panel are cut out. Your own nameplate is white too and
   floats over screen centre, so the plate nearest the centre is skipped — the
   bot would otherwise buff nothing but itself. The right-hold keeps the cursor
-  on the same client point for the whole break; each chosen skill key is
-  pressed once at the start of its `buffer_hold_s` slot and the button stays
-  down across the whole cast, so a charge is never cancelled by a release.
-  A missing white name means it retries on the next scan — no target is ever
-  dropped for a buffer break.
+  on the same client point; each chosen skill key is pressed once at the start
+  of its `buffer_hold_s` slot and the button stays down across every cast, so
+  a charge is never cancelled by a release. The white scan is cached for
+  0.15 s; if the character walks out of `track_radius` for a second the hold
+  ends and the next white name is taken.
 * **HP**: OCR of the digits on the red plate (`1081/1440`). The max is stable
   for a session, so it is learned; a stray digit read is rejected instead of
   triggering a potion. Low HP must be read twice before drinking — except
@@ -125,7 +123,7 @@ One grab per tick, and nothing is decoded twice:
 | fight scans (damage + bar) | at most every 60 ms, only near the target | ~6.5 + 1.9 ms |
 | HP digits | **worker thread** — the tick reads a cached number | ~0 ms |
 | chat line | worker thread, only when the chat block changes | ~0.45 s off-thread |
-| white names | at most every 0.4 s while a buffer break is due | ~15 ms |
+| white names (buffer mode) | at most every 0.15 s instead of the pink scan | ~15 ms |
 | GUI preview | 4 fps, nearest-neighbour downscale, no detection on the UI thread | ~1 ms |
 
 No full-frame HSV conversion exists anywhere: nameplates convert the
