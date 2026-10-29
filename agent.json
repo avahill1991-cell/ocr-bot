@@ -30,9 +30,12 @@
     150,
     1010
   ],
-  "loot_key": "z",
+  "loot_key": "e",
   "loot_after_hit": false,
   "loot_every_s": 1.5,
+  "buffer_mode": true,
+  "buffer_every_s": 60.0,
+  "buffer_hold_s": 5.0,
   "chat_watch": true,
   "chat_box": [
     0.77,

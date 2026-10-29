@@ -28,6 +28,16 @@ Each of the three classes uses that same loop:
 | `ranger` | same click, separate cadence |
 | `gunner` | no left click at all: holds the RIGHT button on the locked target until it dies |
 
+Between targets, on a timer, the bot also takes a **buffer break**: every
+`buffer_every_s` (default 60 s) it points 30 px under the nearest **white**
+nameplate — players and the buffer are white, mobs are pink — and holds the
+RIGHT button for `buffer_hold_s` (5 s), then resumes farming. It never
+interrupts an engaged target. Toggle it with `buffer_mode` (on by default in
+`agent.json`), and the hold/every values are in the panel.
+
+Loot uses the **E** key (`loot_key`); looting is off unless `loot_after_hit`
+is ticked.
+
 ## Run (Windows)
 
 ```bat
@@ -83,6 +93,11 @@ F8 / F9 / F10 or the buttons; a right-click pulse also stops it.
   even when the enemy bar was hidden by effects; older lines cannot "kill" a
   target engaged a moment later. It counts kills in the footer, but it is not
   on the fast path — pixels still swap targets in ~0.1 s.
+* **Buffer**: white nameplates are found with a second half-resolution scan
+  (S ≤ 70, V ≥ 185), with the chat box and the bot's own panel cut out; mobs
+  stay pink. The right-hold keeps the cursor on the same client point for the
+  whole hold, and a missing white name means it retries on the next scan —
+  no target is ever dropped for a buffer break.
 * **HP**: OCR of the digits on the red plate (`1081/1440`). The max is stable
   for a session, so it is learned; a stray digit read is rejected instead of
   triggering a potion. Low HP must be read twice before drinking — except
@@ -101,6 +116,7 @@ One grab per tick, and nothing is decoded twice:
 | fight scans (damage + bar) | at most every 60 ms, only near the target | ~6.5 + 1.9 ms |
 | HP digits | **worker thread** — the tick reads a cached number | ~0 ms |
 | chat line | worker thread, only when the chat block changes | ~0.45 s off-thread |
+| white names | at most every 0.4 s while a buffer break is due | ~15 ms |
 | GUI preview | 4 fps, nearest-neighbour downscale, no detection on the UI thread | ~1 ms |
 
 No full-frame HSV conversion exists anywhere: nameplates convert the

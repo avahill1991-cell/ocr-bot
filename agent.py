@@ -60,6 +60,9 @@ CONFIG = HERE / "agent.json"
 # Pink nameplates: H 160-177, but on dark rock the pink gets dimmer (S 44)
 # and brighter (V 239), so the band is wide on purpose.
 PINK_LO, PINK_HI = np.array([140, 45, 105]), np.array([176, 175, 255])
+# White nameplates: players and the buffer.  Bright, unsaturated text; the
+# chat is white text too, so the white scan cuts the chat box out.
+WHITE_LO, WHITE_HI = np.array([0, 0, 185]), np.array([180, 70, 255])
 
 DEFAULTS = {
     "mode": "melee",               # melee | ranger | gunner
@@ -89,9 +92,13 @@ DEFAULTS = {
     "potion_cooldown_s": 4.0,
     "hp_box": [24, 988, 150, 1010],    # digits inside the red HP plate
     # --- loot -------------------------------------------------------------
-    "loot_key": "z",
+    "loot_key": "e",
     "loot_after_hit": False,
     "loot_every_s": 1.5,
+    # --- buffer -----------------------------------------------------------
+    "buffer_mode": False,          # right-hold under the nearest white name
+    "buffer_every_s": 60.0,        # ... every this many seconds
+    "buffer_hold_s": 5.0,          # ... for this long
     # --- chat -------------------------------------------------------------
     "chat_watch": True,            # read exp lines as a kill receipt
     # fractions of the frame: the chat text block, scrollbar excluded
@@ -420,7 +427,15 @@ class Perception:
         return (x0 - pad) <= cx <= (x1 + pad) and (y0 - pad) <= cy <= (y1 + pad)
 
     def mobs(self, bgr):
-        """Pink nameplates, nearest to screen centre first.
+        """Pink nameplates, nearest to screen centre first."""
+        return self._plates(bgr, PINK_LO, PINK_HI)
+
+    def whites(self, bgr):
+        """White nameplates (players, the buffer), nearest first."""
+        return self._plates(bgr, WHITE_LO, WHITE_HI, cut_chat=True)
+
+    def _plates(self, bgr, lo, hi, cut_chat=False):
+        """Nameplates in one HSV band, nearest to screen centre first.
 
         Scanned at half resolution on a big frame: nameplates are 20+ px wide,
         so nothing is lost and the mask work drops to a quarter of the pixels.
@@ -435,14 +450,20 @@ class Perception:
             hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
         sh, sw = hsv.shape[:2]
         sx, sy = sw / 1920.0, sh / 1080.0
-        m = cv2.inRange(hsv, PINK_LO, PINK_HI)
+        m = cv2.inRange(hsv, lo, hi)
         # HUD masks, in fractions of the frame - never fixed pixels.
         m[:max(1, int(140 * sy)), :max(1, int(150 * sx))] = 0
         m[int(sh * .86):, :] = 0
         m[int(sh * .66):, :int(sw * .16)] = 0
         m[int(sh * .70):, int(sw * .70):] = 0
+        if cut_chat:
+            # the chat is white text too: a "white name" in the chat box is
+            # never the buffer
+            bx0, by0, bx1, by1 = self.cfg["chat_box"]
+            m[int(by0 * sh):int(by1 * sh) + 1,
+              int(bx0 * sw):int(bx1 * sw) + 1] = 0
         m = self._cut(m, hsv.shape, k)       # never see our own panel
-        raw_pink = m
+        raw_ink = m
         m = cv2.dilate(m, np.ones((3, 3), np.uint8), 2)
         n, lab, stats, _ = cv2.connectedComponentsWithStats(m, 8)
         min_area = max(6, int(12 * sx * sy))
@@ -491,9 +512,9 @@ class Perception:
                 continue
             if bh > max_part_h + 2:
                 continue
-            # real plates are solid pink (density ~0.3); jpeg fringes around
+            # real plates are solid ink (density ~0.3); jpeg fringes around
             # yellow system text are ~0.05 specks that dilation inflates
-            if int(raw_pink[y:y + bh, x:x + bw].sum()) // 255 \
+            if int(raw_ink[y:y + bh, x:x + bw].sum()) // 255 \
                     < 0.15 * bw * bh:
                 continue
             cx = x + bw // 2
@@ -1054,6 +1075,11 @@ class Brain:
         self.plate_seen = 0.0
         self.engage_at = 0.0
         self.fought_at = 0.0
+        self.buffering = False
+        self.buffer_until = 0.0
+        self.buffer_pt = None
+        self.last_buffer = 0.0
+        self.last_white = 0.0
         self.last_frame = None
         self.last_mobs = []
         self.hover_miss = []
@@ -1065,6 +1091,9 @@ class Brain:
 
     def release(self):
         self.i.right_up()
+        # a buffer hold never survives a stop, a lost frame or lost focus
+        self.buffering = False
+        self.buffer_pt = None
 
     def _reset_engage(self):
         self.engaged = False
@@ -1121,6 +1150,61 @@ class Brain:
             self.target = None
             self._reset_engage()
             self.release()
+
+    def _buffer(self, rect, bgr, now):
+        """Buffer mode: right-hold under the nearest white name, on a timer.
+
+        Players and the buffer show WHITE names (mobs are pink).  Every
+        `buffer_every_s`, when nothing is engaged, point 30 px under the
+        closest white plate - right under the name, like a mob - and hold the
+        RIGHT button for `buffer_hold_s`.  The hold lives inside the tick, so
+        HP/potion reads keep running; it just skips target acquisition until
+        it ends.  A white name that is not there means try again next tick.
+        """
+        if not self.cfg.get("buffer_mode"):
+            if self.buffering:               # switched off mid-hold
+                self.release()
+                self.buffering = False
+                self.buffer_pt = None
+            return False
+        hold = max(0.5, float(self.cfg["buffer_hold_s"]))
+        if self.buffering:
+            if now >= self.buffer_until:
+                self.release()
+                self.buffering = False
+                self.buffer_pt = None
+                self.last_buffer = now
+                self.state = "buffer-done"
+                self.note(f"buffer hold done ({hold:g}s)")
+                return False
+            if self.buffer_pt:
+                # keep the button down and the cursor on the same spot
+                self.i.right_down(rect[0] + self.buffer_pt[0],
+                                  rect[1] + self.buffer_pt[1])
+            self.state = "buffer"
+            return True
+        if self.last_buffer == 0.0:
+            self.last_buffer = now           # first hold after one interval
+            return False
+        if now - self.last_buffer < float(self.cfg["buffer_every_s"]):
+            return False
+        # white plates are a second half-res scan; do not repeat it every
+        # tick while the interval is due and no white name is on screen
+        if now - self.last_white < 0.40:
+            return False
+        self.last_white = now
+        for wm in self.p.whites(bgr):
+            if self.p.in_exclude(wm["cx"], wm["click_y"]):
+                continue
+            self.buffering = True
+            self.buffer_until = now + hold
+            self.buffer_pt = (wm["cx"], wm["click_y"])
+            self.state = "buffer"
+            self.note(f"buffer hold under white name at ({wm['cx']},"
+                      f"{wm['click_y']}) for {hold:g}s")
+            self.i.right_down(rect[0] + wm["cx"], rect[1] + wm["click_y"])
+            return True
+        return False
 
     # -- one tick --------------------------------------------------------
     def tick(self, rect):
@@ -1236,6 +1320,10 @@ class Brain:
             else:
                 self._track(now, mobs)
                 target = self.target
+
+        # ---- buffer break between targets --------------------------------
+        if target is None and self._buffer(rect, bgr, time.time()):
+            return
 
         # ---- otherwise: find, hover, blue? click --------------------------
         if target is None:
@@ -1491,6 +1579,7 @@ def run_gui(cfg, replay=None):
     entry(1, 0, "blue px", "hover_blue_min")
     entry(1, 1, "hover s", "hover_confirm_s")
     entry(2, 0, "blue +", "hover_delta_min")
+    entry(2, 1, "buff s", "buffer_hold_s")
 
     tk.Label(grid, text="skills", bg=BG, fg=DIM, font=("Consolas", 8),
              anchor="e").grid(row=3, column=0, sticky="e", padx=(0, 3))
@@ -1507,6 +1596,9 @@ def run_gui(cfg, replay=None):
         save_cfg()
     skills_var.trace_add("write", commit_skills)
 
+    entry(4, 0, "buff every", "buffer_every_s")
+    entry(4, 1, "loot key", "loot_key")
+
     opt = tk.Frame(box, bg=BG)
     opt.pack(fill="x", padx=4, pady=(1, 0))
 
@@ -1522,6 +1614,7 @@ def run_gui(cfg, replay=None):
 
     toggle("require_blue", "require blue")
     toggle("loot_after_hit", "loot")
+    toggle("buffer_mode", "buffer")
 
     brow = tk.Frame(box, bg=BG)
     brow.pack(fill="x", padx=4, pady=(0, 4))
